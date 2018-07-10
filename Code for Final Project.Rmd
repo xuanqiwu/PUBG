@@ -1,0 +1,338 @@
+---
+title: "Code for Final Project"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+#Download data from github
+library(rio)
+library(ggplot2)
+library(rpart)
+install.packages("rpart.plot")
+library(rpart.plot)
+github.url <- "https://github.com/xuanqiwu/PUBG/blob/master/"
+file.url <- "PUBGNEWS1.csv?raw=true"
+PUBG.season1 <- import(paste0(github.url, file.url))
+
+github.url <- "https://github.com/xuanqiwu/PUBG/blob/master/"
+file.url1 <- "PUBGNEWS2.csv?raw=true"
+PUBG.season2 <- import(paste0(github.url, file.url1))
+#drop play times < 10
+PUBG.season1 <- subset(PUBG.season1, solo_RoundsPlayed >= 10)
+```
+
+In order to set up our analysis on game strategy and prediction, we first visualized an array of factors that are related to game performance.  Because PUBG is a competitive shooting game with only one winner each time, this part focused mainly on win ratio, usage of weapon, and distribution of other user survival data. 
+```{r}
+###########Weapon##############
+##First Data Visualization##
+#count weapon type
+weapon <- as.data.frame(PUBG.season1$deaths_0_description)
+weapon$count = 1
+table.weapon <- as.data.frame(table(weapon$`PUBG.season1$deaths_0_description`))
+table.weapon <- table.weapon[order(table.weapon$Freq,decreasing=F),]  
+barplot(table.weapon$Freq, cex.names = 0.7, xlab = "Number",main = "Popularity of Weapon", horiz = TRUE, names.arg = table.weapon$Var1, col = "#008CCC",
+        space = 0.5, border = NA, las = 1, cex.axis = 0.7)
+
+##Second Data Visualization##
+#keep data of top 5 weapon
+weaponnames <- c("M416", "SCAR-L", "M16A4", "AKM", "UMP9")
+PUBGtop5 <- subset(PUBG.season1, PUBG.season1$deaths_0_description %in% weaponnames)
+#scatter plot of kills and headshot kills by weapon type
+ggplot(data = PUBGtop5, aes(x = solo_DamagePg, y = solo_HeadshotKillsPg)) + geom_point(col = "#008CCC") + facet_wrap(~deaths_0_description) +
+  xlab("Damage Per Game") + ylab("Headshot Kills Per Game")
+
+###########Experience##############
+##Third Data Visualization##
+ggplot(data = PUBG.season1, aes(x = solo_RoundsPlayed, y = solo_Losses)) + geom_point(col = "#008CCC") + geom_abline(col = "#828282") +
+  xlab("Rounds Played") + ylab("Game Losses")
+
+##Forth Data Visualization##
+ggplot(data = PUBG.season1, aes(x = solo_RoundsPlayed, y = solo_WinRatio)) + geom_point(col = "#008CCC") +
+  xlab("Rounds Played") + ylab("Win Ratio")
+
+###########Other Descriptive Statistics#############
+hist(PUBG.season1$solo_WinRatio, breaks = 100, col = "#008CCC", border = NA, xlab = "Win Ratio", main = "Win Ratio Distribution")
+hist(PUBG.season1$solo_KillsPg, breaks = 100, col = "#008CCC", border = NA, xlab = "Kills Per Game", main = "Kills Per Game Distribution")
+hist(PUBG.season1$solo_TimeSurvivedPg, breaks = 100, col = "#008CCC", border = NA, xlab = "Survival Time Per Game", main = "Survival Time Per Game Distribution")
+```
+
+
+OLS Regression for Win Ratio
+```{r}
+##############Predict Win Percentage###############
+github.url <- "https://github.com/xuanqiwu/PUBG/blob/master/"
+file.url <- "PUBGNEWS1.csv?raw=true"
+Season1.winp <- import(paste0(github.url, file.url))
+
+github.url <- "https://github.com/xuanqiwu/PUBG/blob/master/"
+file.url1 <- "PUBGNEWS2.csv?raw=true"
+Season2.winp <- import(paste0(github.url, file.url1))
+
+#check whether there is any missing value in our two datasets
+#season1
+row.has.na <- apply(Season1.winp, 1, function(x){any(is.na(x))})
+sum(row.has.na)
+#no missing vlaue
+
+#season2
+row.has.na <- apply(Season2.winp, 1, function(x){any(is.na(x))})
+sum(row.has.na)
+#drop all missing value
+Season2.winp <- Season2.winp[!row.has.na,]
+
+#subtract user id and win ratio from season 2
+win.id.s2 <- data.frame(tracker_id = Season2.winp$tracker_id, solo_WinRatio_S2 = Season2.winp$solo_WinRatio)
+
+#merge win ratio into season 2 into the dataset of season 1 by user id
+Season1.winp <- merge(Season1.winp, win.id.s2, all.x = TRUE)
+#drop missing value
+row.has.na <- apply(Season1.winp, 1, function(x){any(is.na(x))})
+sum(row.has.na)
+Season1.winp <- Season1.winp[!row.has.na,]
+
+#delete players who played less than 10 rounds
+Season1.winp <- subset(Season1.winp, solo_RoundsPlayed >= 10)
+#delete players whose winratio is less than 1
+Season1.winp <- subset(Season1.winp,solo_WinRatio_S2 >= 1)
+
+#divid dataset into 10 groups
+#create function
+k.fold <- function(data, k){
+  #randomly assign numbers to a new vector based on the number of observations
+  rand <- runif(nrow(Season1.winp))
+  #divide the vector into equal intervals (k groups)
+  folds <- cut(rand, k, labels = FALSE)
+  return(folds)
+}
+
+#apply the function to dataset
+Season1.winp$folds <- k.fold(Season1.winp, 10)
+
+# create function for cross validation
+cross.validation <- function(df, folds, formula){
+  #create a place holder for redult
+  result <- c()
+  for (i in 1:10){
+    object <- lm(formula, data = df[df$folds != i,])
+    prediction <- predict.lm(object, df[df$folds == i,])
+    win.ratio0 <- df$solo_WinRatio_S2[df$folds == i]
+    mape <- 100*mean(abs(prediction/win.ratio0 - 1), na.rm = T)
+    result <- c(result,mape)
+  }
+  return(c(mean(result), sd(result)))
+}
+
+#The 1st Model
+formula1 <- as.formula("solo_WinRatio_S2 ~ solo_Kills + solo_RoundsPlayed + solo_AvgRideDistance + solo_WinTop10Ratio + solo_MoveDistancePg + solo_DamagePg")
+mape.value1 <- cross.validation(Season1.winp, folds, formula1)
+
+#The 2nd Model
+formula2 <- as.formula("solo_WinRatio_S2 ~ solo_Kills + solo_WalkDistance + solo_RideDistance + solo_AvgSurvivalTime")
+mape.value2 <- cross.validation(Season1.winp, folds, formula2)
+
+#The 3nd Model
+formula3 <- as.formula("solo_WinRatio_S2 ~ solo_Kills + solo_AvgWalkDistance + solo_AvgRideDistance + solo_AvgSurvivalTime + solo_VehicleDestroys + solo_DailyKills + solo_RoundsPlayed + solo_MoveDistancePg + solo_WalkDistance + solo_RideDistance + solo_TimeSurvivedPg + solo_Heals + solo_Kills + solo_DamagePg + solo_RoadKillsPg")
+mape.value3 <- cross.validation(Season1.winp, folds, formula3)
+
+#The 4st Model
+formula4 <- as.formula("solo_WinRatio_S2 ~ solo_HeadshotKillsPg + solo_DamagePg + solo_WalkDistance")
+mape.value4 <- cross.validation(Season1.winp, folds, formula4)
+
+#The 5th Model
+formula5 <- as.formula("solo_WinRatio_S2 ~ solo_RoundsPlayed + solo_DamagePg + solo_HealsPg + solo_KillsPg + solo_AvgRideDistance + solo_LongestKill + solo_TimeSurvivedPg +solo_Rating + solo_Top10Ratio + solo_Boosts + solo_HeadshotKills +solo_Days")
+mape.value5 <- cross.validation(Season1.winp, folds, formula5)
+
+# Choose Model 1
+ols <- lm(formula1, data = Season1.winp)
+summary(ols)
+#apply ols in Seaon 2 to predict win percentage in season 3
+Season2.winp$solo_WinRatio_S3_predict <- predict(ols, newdata = Season2.winp)
+#adjust unreasonable win ratio
+Season2.winp$solo_WinRatio_S3_predict[Season2.winp$solo_WinRatio_S3_predict <= 0] <- 0.001
+Season2.winp$solo_WinRatio_S3_predict[Season2.winp$solo_WinRatio_S3_predict > 100] <- 99.99
+
+#calculate average win ratio in Season 1
+average.win.ratin.S1 <- c(mean(Season1.winp$solo_WinRatio, na.rm = T),sd(Season1.winp$solo_WinRatio, na.rm = T))
+#calculate average win ratio in Season 2
+average.win.ratin.S2 <- c(mean(Season2.winp$solo_WinRatio, na.rm = T),sd(Season2.winp$solo_WinRatio, na.rm = T))
+#calculate predicted average win ratio in Season 3
+average.win.ratin.S3 <- c(mean(Season2.winp$solo_WinRatio_S3_predict, na.rm = T),sd(Season2.winp$solo_WinRatio_S3_predict, na.rm = T))
+```
+
+
+Decision Tree for Survival Time Per Game
+First step: codes for cross-validatio and cp value choosing
+```{r}
+#Choose the appropriate cut-off points
+summary(PUBG.season1$solo_TimeSurvivedPg)
+
+#Categorizing survival time for both datasets
+PUBG.season1$time <- "immediate"
+PUBG.season1$time[PUBG.season1$solo_TimeSurvivedPg > 858  & PUBG.season1$solo_TimeSurvivedPg < 995] <- "short"
+PUBG.season1$time[PUBG.season1$solo_TimeSurvivedPg >= 995  & PUBG.season1$solo_TimeSurvivedPg < 1160] <- "medium"
+PUBG.season1$time[PUBG.season1$solo_TimeSurvivedPg >= 1160] <- "long"
+
+PUBG.season2$time <- "immediate"
+PUBG.season2$time[PUBG.season2$solo_TimeSurvivedPg > 858  & PUBG.season2$solo_TimeSurvivedPg < 995] <- "short"
+PUBG.season2$time[PUBG.season2$solo_TimeSurvivedPg >= 995  & PUBG.season2$solo_TimeSurvivedPg < 1160] <- "medium"
+PUBG.season2$time[PUBG.season2$solo_TimeSurvivedPg >= 1160] <- "long"
+
+#check whether there is missing value in the two datasets
+#season1
+row.has.na <- apply(PUBG.season1, 1, function(x){any(is.na(x))})
+sum(row.has.na)
+#no missing vlaue
+
+#season2
+row.has.na <- apply(PUBG.season2, 1, function(x){any(is.na(x))})
+sum(row.has.na)
+#drop all missing value
+PUBG.season2 <- PUBG.season2[!row.has.na,]
+
+#subtract user id and survival time from season 2
+sur.id.s2 <- data.frame(tracker_id = PUBG.season2$tracker_id, solo_Time_S2 = PUBG.season2$time)
+
+#merge survival time into season 2 into the dataset of season 1
+PUBG.season1 <- merge(PUBG.season1, sur.id.s2, all.x = TRUE)
+
+#drop missing value
+row.has.na <- apply(PUBG.season1, 1, function(x){any(is.na(x))})
+sum(row.has.na)
+PUBG.season1 <- PUBG.season1[!row.has.na,]
+
+################Model#################
+#Assign test group in train dataset
+k.fold <- function(data, k){
+  #randomly assign numbers to a new vector based on the number of observations
+  rand <- runif(nrow(PUBG.season1))
+  #divide the vector into equal intervals (k groups)
+  folds <- cut(rand, k, labels = FALSE)
+  return(folds)
+}
+#divide train into 10 groups
+PUBG.season1$folds <- k.fold(PUBG.season1, 5)
+
+#Calculate mean F1 score
+meanf1 <- function(actual, predicted){
+  # Desc: 
+  #   Weighted mean F1 score function
+  #
+  # Args:
+  #   actual = a vector of actual labels
+  #   predicted = predicted labels
+  #
+  # Returns:
+  #   Single value F1 score
+  #
+  
+  classes <- unique(actual)
+  results <- data.frame()
+  
+  #Loop through all classes
+  for(k in classes){
+    prec <- sum(predicted == k & actual == k)/sum(predicted == k)
+    rec <- sum(predicted == k & actual == k)/sum(actual == k)
+    results <- rbind(results, 
+                     data.frame(class.name = k,
+                                weight = sum(actual == k)/length(actual),
+                                precision = prec, 
+                                recall = rec))
+  }
+  
+  #Calculate weighted mean
+  score <- results[,2] * 2 * (results[,3] * results[,4]) / (results[,3] + results[,4]) 
+  return(sum(score))
+}
+
+#Rpart model for meanf1 calculation
+#create a placeholder for loop results
+placeholder <- data.frame()
+dec.treeModel <- function(spec, data){
+  #cross validation
+  for(i in 1:5) {
+    #decision tree model from train group - (k-1)folds and folds != i
+    model <- rpart(spec, data = PUBG.season1[PUBG.season1$folds != i,], method = "class", cp = 0)
+    
+    #extract the optimal cp value
+    cptable <- as.data.frame(printcp(model)) #build a dataframe of cptable
+    xerror_min <- cptable[cptable$xerror == min(cptable$xerror),"xerror"] #extract the xerror_min
+    xstd_min <- cptable[cptable$xerror == min(cptable$xerror),"xstd"] #extract the corresponding xstd
+    errorplussd <- sum(xerror_min, xstd_min) # add two extracted value
+    opt.cp.row <- cptable[cptable$xerror == max(cptable$xerror[cptable$xerror <= errorplussd]),] #get the row of optimal cp
+    opt.cp <- opt.cp.row[1,"CP"] #extract the value of optimal cp
+    model <- rpart(spec, data = PUBG.season1[PUBG.season1$folds != i ,], method = "class", cp = opt.cp) #fit the model with optical cp
+    
+    #predict when folds = i
+    testdata <- PUBG.season1[PUBG.season1$folds == i,]
+    testdata$pred <- predict(model, newdata = testdata, type = "class")
+    
+    #calculate meanf1 with meanf1 function and put values of each loop into the placeholder
+    mean.f1<- meanf1(testdata$solo_Time_S2, testdata$pred)
+    placeholder <- rbind(placeholder, mean.f1)
+  }
+  
+  #calculate the mean of meanf1
+  colnames(placeholder) <- "MEANF1"
+  place.holder <- data.frame(mean = mean(placeholder$MEANF1))
+  return(place.holder)
+}
+```
+
+```{r}
+#Model specification and cross-validate the model with meanf1
+#Model 1
+spec1 <- as.formula("solo_Time_S2 ~ solo_Rating + solo_HeadshotKillsPg + solo_RoundsPlayed + solo_Top10sPg + solo_AvgWalkDistance + solo_AvgRideDistance + solo_DamagePg + solo_VehicleDestroys + 
+solo_RoadKillsPg +solo_MoveDistancePg +  solo_HealsPg + solo_KillsPg ")
+cv.f1 <- dec.treeModel(spec1,PUBG.season1)
+
+#Model 2
+spec2 <- as.formula("solo_Time_S2 ~ solo_WinRatio + solo_KillDeathRatio + solo_Rating + solo_HeadshotKillsPg + solo_RoundsPlayed + solo_Top10sPg + solo_AvgWalkDistance + solo_AvgRideDistance + solo_RoadKillsPg + solo_MoveDistancePg +  solo_HealsPg + solo_KillsPg ")
+cv.f2 <- dec.treeModel(spec2,PUBG.season1)
+
+#Model 3
+spec3 <- as.formula("solo_Time_S2 ~ solo_WinRatio + solo_KillDeathRatio + solo_Rating + solo_HeadshotKillsPg + solo_DamagePg + solo_RoadKillsPg +solo_MoveDistancePg + solo_HealsPg + solo_KillsPg + solo_RevivesPg + solo_TeamKillsPg")
+cv.f3 <- dec.treeModel(spec3,PUBG.season1)
+
+#Model 4
+spec4 <- as.formula("solo_Time_S2 ~ solo_WinRatio + solo_KillDeathRatio + solo_Rating + solo_HeadshotKillsPg + solo_DamagePg + solo_MoveDistancePg +  solo_HealsPg + solo_KillsPg")
+cv.f4 <- dec.treeModel(spec4,PUBG.season1)
+###Model 4 has the highest cp value, so we choose Model 4
+
+
+#Build the regression model with the specification using the whole train group
+Dec.tree <- rpart(spec4,data = PUBG.season1, cp = 0, method = "class") #assume cp = 0
+cptable.train <- as.data.frame(printcp(Dec.tree)) #build a dataframe of cptable
+minxerror.train <- cptable.train[cptable.train$xerror == min(cptable.train$xerror),"xerror"] #extract the xerror_min
+minxstd.train <- cptable.train[cptable.train$xerror == min(cptable.train$xerror),"xstd"] #extract the corresponding xstd
+errorplussd.train <- sum(minxerror.train, minxstd.train) # add two extracted value
+opt.cp.row.train <- cptable.train[cptable.train$xerror == max(cptable.train$xerror[cptable.train$xerror <= errorplussd.train]),] #get the row of optimal cp
+opt.cp.train <- opt.cp.row.train[1,"CP"] #extract the value of optimal cp
+#fit the model with optimal cp
+Dec.tree <- rpart(spec4,data = PUBG.season1, method = "class", cp = opt.cp.train) 
+#plot the decision tree
+rpart.plot(Dec.tree, tweak = 1.1)
+
+#Predict survival time of next season
+PUBG.season2$pred.survivaltime <- predict(Dec.tree, newdata = PUBG.season2, type = "class")
+
+#sum the survival time of each season
+table(PUBG.season1$time) #season 1
+table(PUBG.season2$time) #season 2
+table(PUBG.season2$pred.survivaltime) #season 3
+#season 3
+```
+
+Get the final prediction of next season
+```{r}
+PUBG.Season3.Prediction <- data.frame(PUBG.season2$player_name, PUBG.season2$tracker_id,PUBG.season2$pred.survivaltime, Season2.winp$solo_WinRatio_S3_predict)
+```
